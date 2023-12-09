@@ -1,0 +1,1076 @@
+---
+title: "ChatGPT on Reddit: Unveiling Sentiments & Buzzing Topics"
+author: "Siheng Huang, Yicong Li, Jiechun Lin, Yunhao Li"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+
+library(tidytext)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(textstem)
+library(topicmodels)
+library(tidyverse)
+library(gutenbergr)
+library(textdata)
+library(lubridate)
+library(textclean)
+library(tm)
+
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(dplyr)
+pacman::p_load_gh("trinker/textshape", "trinker/lexicon", "trinker/textclean")
+if (!require("wordcloud")) install.packages("wordcloud")
+library(wordcloud)
+
+```
+
+# Part One - Getting data from reddit
+
+```{r}
+if (!require(RedditExtractoR)) {
+  devtools::install_version("RedditExtractoR", version = "2.1.5", repos = "http://cran.us.r-project.org")
+}
+library(RedditExtractoR)
+```
+
+## get the top posts from the chatGPT subreddit
+
+```{r}
+top_chatGPT_urls = find_thread_urls(subreddit = "chatGPT", sort_by="top",period='all')
+```
+
+## Filter the data
+
+```{r}
+top_chatGPT_urls_latest = subset(top_chatGPT_urls, date_utc >= '2022-12-01' & date_utc < '2023-04-01')
+
+```
+
+## set some containers(list) to store the data
+
+```{r}
+date_utc = c()
+url = c()
+title = c()
+comment = c()
+title_text = c()
+```
+
+## choose the number of posts
+
+```{r}
+nrow(top_chatGPT_urls_latest)
+```
+
+## store the data
+
+```{r}
+for (i in 1:nrow(top_chatGPT_urls_latest)){
+  
+  c1 = get_thread_content(top_chatGPT_urls_latest$url[i])
+  df1 = data.frame(c1$comments)
+  
+  
+  date_utc = append(date_utc,df1$date)
+  url = append(url,df1$url)
+  comment = append(comment,df1$comment)
+  
+  title = append(title,rep(top_chatGPT_urls_latest$title[i], times = nrow(df1)))
+  title_text = append(title_text,rep(top_chatGPT_urls_latest$text[i], times = nrow(df1)))
+
+}
+```
+
+```{r}
+data = data.frame(date_utc = date_utc,
+                  url = url,
+                  title = title,
+                  title_text = title_text,
+                  comment = comment
+                  )
+```
+
+## Store as an offline file
+
+```{r}
+library(openxlsx)
+write.csv(data, file = "data.csv", row.names = FALSE)
+```
+
+------------------------------------------------------------------------
+
+# Part Two: Data Cleaning and Exploration
+
+## Here textclean package ([https://www.rdocumentation.org/packages/textclean/)](https://www.rdocumentation.org/packages/textclean/)) is used to deal with:
+
+-   replace_contraction(x): English contractions (e.g. "I'm" -\> "im")
+-   replace_emoji(x): Emoji (e.g. "ðŸ"¦" -\> "package")
+-   replace_emoticon(x): emoticons (e.g. ":)" -\> "smiley") (**currently not functional**)
+-   replace_html(x): HTML (e.g. "\>" -\> "\>")
+-   replace_internet_slang(x): Internet Slang (e.g. "NP" -\> "no problem")
+-   replace_kern(x): Kerning (e.g. "W O R L D" -\> "WORLD")
+-   replace_ordinal(x): Ordinal Numbers (e.g. "1st" -\> "first")
+-   replace_symbol(x): Symbols (e.g. "\@" -\> at")
+-   replace_white(x): White Space (e.g. "\t" -\>" ")
+-   replace_word_elongation(x) (e.g. "goooood" -\> "good")
+
+## Some methods in this package might be useful but undecided to use:
+
+-   replace_non_ascii(x): Non-ASCII Characters (e.g. "\xF7" -\> ÷ -\> "/")
+-   replace_grade(x): Grade (e.g. "C" -\> "average")
+-   replace_rating(x): Ratings (e.g. "10 out of 10" -\> "best")
+
+```{r}
+df <- read.csv('/Users/siheng_huang/Desktop/data.csv', header = TRUE)
+dim(df)
+```
+
+```{r}
+# Check colnames
+colnames(df)
+
+# Check dimension
+dim(df)
+```
+
+## Check missing values
+
+```{r}
+# drop null values
+# df <- na.omit(df$comment)
+
+# check null value in date
+sum(is.na(df$date_utc))
+
+# check null value in title
+sum(is.na(df$title))
+sum(is.na(df$title_text))
+
+# check null value in comment
+sum(is.na(df$comment))
+```
+
+## 
+
+```{r}
+# Count unique url
+length(unique(df$url))
+
+# Count unique title_text
+length(unique(df$title_text))
+```
+
+> As shown that, counts of unique title and unique url are equal, whereas unique title_text is much less than the unique title, since author could leave blank or possibly write the same title text under different title.
+
+## Value counts for 'title': How many comments in each title?
+
+```{r}
+comments_in_title_count <- df %>% 
+  group_by(title) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+
+head(comments_in_title_count, 30)
+```
+
+## Value counts for 'title_text': How many comments in each title_text?
+
+```{r}
+comments_in_text_count <- df %>%
+  group_by(title_text) %>%
+  summarize(count = n()) %>%
+  arrange(desc(count))
+
+head(comments_in_text_count, 30)
+```
+
+## Value counts for 'comments' without considering title: check duplicated comments
+
+```{r}
+duplicated_comment_count <- df %>%
+  group_by(comment) %>%
+  summarize(count = n()) %>%
+  filter(count > 1) %>%
+  arrange(desc(count))
+
+head(duplicated_comment_count, 10)
+```
+
+## Data Pre-process
+
+> No missing value for columns, however, need to remove comment rows that is insignificant but could not be cleaned in the later step, for example: "[deleted]" or "[removed]"
+
+```{r}
+df <- df %>% 
+  filter(comment != "[deleted]" & comment != "[removed]")
+
+# value counts for 'comments' without considering title: check duplicated comments 
+duplicated_comment_count <- df %>%
+  group_by(comment) %>%
+  summarize(count = n()) %>%
+  filter(count > 1) %>%
+  arrange(desc(count))
+
+head(duplicated_comment_count, 30)
+```
+
+```{r}
+# Check dimension again
+dim(df)
+```
+
+## Data Clean & Normalization
+
+##### Difficulty: how to deal with internet slang, or rather, internet colloquialisms, like "lol", ":("
+
+-   transformed by available default methods from textclean package
+
+##### Difficulty: how to deal with control characters like "\\031" to "'", these are not ASCII control characters
+
+-   "\\031" should be referred as "'", other control characters usually does not have specific meaning
+
+##### Difficulty: how to deal with words with indirect meaning, like "'super'", some time positive words are used with quotes to show ironic, or negative meaning; sometimes used as emphasize
+
+-   transformed by available default methods from textclean package
+
+## Initialize clean
+
+```{r}
+df_clean <- df
+```
+
+## Define function for remove url, reddit unique control variables and some special cases caught manually
+
+-   Control Variables like "/031" produced during scraping are not ASCII and are unable to be solved by changing encoding. Here is an solution reference for this issue: <https://stackoverflow.com/questions/63305643/why-is-regex-not-picking-up-on-the-following-segments-within-a-string>
+
+```{r}
+# define function of sub-string replacement
+gsub_config <- function(x, a, b){
+  return(gsub(a, b, x))
+}
+
+# define function of removing url, reddit unique control variables, and some special cases caught manually
+remove_cvar <- function(x){
+  result <- x %>% 
+    gsub_config("http[s]?://\\S+", "") %>% # remove links from sentence
+    gsub_config("[\001\002\003\004\005\006\007\010\011\013\014\015\016\017\018\020\021\022\023\024\025\026\027\028\030\032\033\034\035\036\037\038]", "") %>%    # clean control variable
+    gsub_config("\031", "'") %>%   # replace "\031" with "'"
+    gsub_config("/", " ")
+  return(result)
+}
+```
+
+## Define function for data clean
+
+```{r}
+clean_sentence <- function(x){
+  result <- x %>% 
+    remove_cvar() %>%             # clean url, control variables and special cases first
+    replace_white() %>%           # normalize white spaces from ("\n", "\t", "\r") to (" ")
+    replace_contraction() %>%     # transform English contractions
+    replace_kern() %>%            # normalize words with manual spaces (a form of kerning) 
+    replace_word_elongation() %>% # normalize elongation (a.k.a. "word lengthening")
+    replace_html() %>%            # transform HTML tags and symbols sticks
+    replace_emoji() %>%           # transform emoji
+    replace_emoticon %>%          # transform emoticon
+    replace_symbol() %>%          # transform symbol
+    replace_internet_slang() %>%  # transform internet slang
+    replace_ordinal()             # normalize ordinal numbers
+  return (result)
+}
+```
+
+## Sample with issues pciked from comment column of dataset
+
+```{r}
+x <- c("I mean, you\031re not wrong, but you don't seem to be aware that Google\031s own large language model ;-)", 
+       "\n\n A lot of people know this probably but because [@ this thread](https://www.reddit.com/r/ChatGPT/comments/119j7u5/why_how_noble_of_you/)",
+       "No problem, I'm happy to pay it as long as it's a fair price. $5 a month is fair.",
+       "They've done nothing and their stock price has been declining for a year. \n\nEvery trader I know is shorting G O O G.",
+       "Full death con 3",
+       "The issue is that chatGPT can do 99% of what we use google for, yet generates 1000x less revenue.",
+       "&gt;It can absolutely not do 99% of what Google can do yet. \n\nWrong.\n\nProtip: Ask ChatGPT to behave like Google and it will.",
+       "It doesn\031t have access to any \034information\035.",
+       "I dunno, I can see a huge portion of current chatGPT users going back to google when openai starts charging for access.",
+       "100% agree, lol"
+      )
+```
+
+```{r}
+# Sample output
+x %>% clean_sentence()
+```
+
+> ISSUE: sentence started with "\>" (after html transformation), meaning it quotes part of the sentence from the comments above. However, there is hard to check where the quote ends. Therefore, be careful.
+
+## Normalization: sentence transformation
+
+```{r}
+# df_clean$comment <- clean_sentence(df_clean$comment)
+# df_clean$title <- clean_sentence(df_clean$title)
+# df_clean$title_text <- clean_sentence(df_clean$title_text)
+# df_clean$date_utc <- gsub("-", "", df_clean$date_utc, fixed=TRUE)
+```
+
+## Cleaned data overview
+
+```{r}
+# save cleaned data
+# write.csv(df_clean, file = "/Users/Sonis/Desktop/pre-processed_data.csv", row.names = FALSE)
+# head(df_clean)
+
+# read cleaned data
+df_clean <- read.csv('/Users/Sonis/Desktop/pre-processed_data.csv', header = TRUE)
+dim(df_clean)
+```
+
+## Add unique id to title_text and comment. As mentioned before, it is better to refer unique url as unique title_text here.
+
+```{r, warning = FALSE, message=FALSE}
+df_clean_id <- df_clean %>%
+  group_by(url) %>%
+  mutate(title_text_id = group_indices()) %>%
+  ungroup() %>%
+  mutate(comment_id = row_number()) %>%
+  select(date_utc, title, title_text, comment, title_text_id, comment_id)
+
+dim(df_clean_id)
+```
+
+## Unigram Tokenization & Remove Stop Words
+
+-   Define unigram function
+
+```{r, warning = FALSE, message=FALSE}
+unigram <- function(x){
+  result <- x %>%
+  
+    unnest_tokens(word_title_text, title_text) %>%
+    mutate(word_title_text = str_to_lower(word_title_text)) %>%
+    mutate(word_title_text = str_extract(word_title_text, "[a-z]+")) %>%
+    anti_join(stop_words, by = c("word_title_text" = "word")) %>%
+  
+    unnest_tokens(word_comment, comment) %>%
+    mutate(word_comment = str_to_lower(word_comment)) %>%
+    mutate(word_comment = str_extract(word_comment, "[a-z]+")) %>%
+    filter(word_comment != "NA") %>%
+    anti_join(stop_words, by = c("word_comment" = "word"))
+  
+  return(result)
+}
+```
+
+-   Perform one token first, on both title_text and comment
+
+```{r}
+# tidy_comment_word <- df_clean_id %>% unigram()
+
+# save unigram data
+# write.csv(tidy_comment_word, file = "/Users/Sonis/Desktop/unigram_data.csv", row.names = FALSE)
+
+# load unigram data
+tidy_comment_word <- read.csv('/Users/Sonis/Desktop/unigram_data.csv', header = TRUE)
+```
+
+-   Show output dimension
+
+```{r}
+dim(df_clean_id)
+dim(tidy_comment_word)
+```
+
+-   Show output head
+
+```{r}
+head(tidy_comment_word)
+```
+
+-   Show top frequent word
+
+```{r}
+unigram_frequency <- tidy_comment_word %>%
+  count(word_comment, sort = TRUE) %>%
+  head(100)
+
+head(unigram_frequency, 10)
+```
+
+-   Show word cloud
+
+```{r}
+unigram_vector <- as.numeric(unigram_frequency$n)
+names(unigram_vector) <- unigram_frequency$word_comment
+
+wordcloud(words = names(unigram_vector), freq = unigram_vector, 
+          min.freq = 1, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+```
+
+## Bigram Tokenization & Remove Stop Words
+
+Since processing bigram for 15W data could lead to system overload, Bigram Tokenization needs to be operated onto partitioned dataset.
+
+-   Define bigram function
+
+```{r}
+bigram <- function(x){
+  result <- x %>%
+  
+    unnest_tokens(bigram_title_text, title_text, token = "ngrams", n = 2) %>%
+    mutate(bigram_title_text = str_to_lower(bigram_title_text)) %>%
+    separate(bigram_title_text, c("word1", "word2"), sep = " ") %>%
+    mutate(word1 = str_extract(word1, "[a-z]+")) %>%
+    mutate(word2 = str_extract(word2, "[a-z]+")) %>%
+    filter(word1 != "NA" & word2 != "NA") %>%
+    filter(!word1 %in% stop_words$word) %>%
+    filter(!word2 %in% stop_words$word) %>%
+    unite(bigram_title_text, word1, word2, sep=" ") %>%
+  
+    unnest_tokens(bigram_comment, comment, token = "ngrams", n = 2) %>%
+    mutate(bigram_comment = str_to_lower(bigram_comment)) %>%
+    separate(bigram_comment, c("word1", "word2"), sep = " ") %>%
+    mutate(word1 = str_extract(word1, "[a-z]+")) %>%
+    mutate(word2 = str_extract(word2, "[a-z]+")) %>%
+    filter(word1 != "NA" & word2 != "NA") %>%
+    filter(!word1 %in% stop_words$word) %>%
+    filter(!word2 %in% stop_words$word) %>%
+    unite(bigram_comment, word1, word2, sep=" ")
+  
+  return(result)
+}
+```
+
+-   Perform Bigram Tokenization
+
+```{r}
+# tidy_comment_bigram1 <- bigram(df_clean_id[1:50000,])
+```
+
+```{r}
+# tidy_comment_bigram2 <- bigram(df_clean_id[50001:100000,])
+```
+
+```{r}
+# tidy_comment_bigram3 <- bigram(df_clean_id[100001:nrow(df_clean_id),])
+```
+
+-   Bind Results
+
+```{r}
+# tidy_comment_bigram <- bind_rows(tidy_comment_bigram1, tidy_comment_bigram2, tidy_comment_bigram3)
+
+# save bigram data
+# write.csv(tidy_comment_bigram, file = "/Users/Sonis/Desktop/bigram_data.csv", row.names = FALSE)
+
+# load unigram data
+tidy_comment_bigram <- read.csv('/Users/Sonis/Desktop/bigram_data.csv', header = TRUE)
+```
+
+-   Show output dimension
+
+```{r}
+dim(df_clean_id)
+dim(tidy_comment_bigram)
+```
+
+-   Show output head
+
+```{r}
+head(tidy_comment_bigram)
+```
+
+-   Show top frequent bigram
+
+```{r}
+bigram_frequency <- tidy_comment_bigram %>%
+  count(bigram_comment, sort = TRUE) %>%
+  head(100)
+
+head(bigram_frequency, 10)
+```
+
+-   Show word cloud
+
+```{r, warning = FALSE, message=FALSE}
+bigram_vector <- as.numeric(bigram_frequency$n)
+names(bigram_vector) <- bigram_frequency$bigram_comment
+
+wordcloud(words = names(bigram_vector), freq = bigram_vector, 
+          min.freq = 1, random.order = FALSE, colors = brewer.pal(8, "Dark2"))
+```
+
+-----------------------------------------------------------------------------------
+
+# Part Three: Topic Modeling
+
+- Please load data files "data.csv", "pre-processed_data.csv","dec_comments.csv","jan_comments.csv","feb_comments.csv","mar_comments.csv","apr_comments.csv" for saving the time for data processing.
+
+```{r}
+df <- read.csv('data.csv', header = TRUE)
+
+glimpse(df)
+
+length(unique(df$url))
+length(unique(df$title))
+```
+
+## There are 861 urls but the number of titles is 860. The chunk below finds the repeated title "Accurate". This is not a big issue, we can ignore it.
+
+```{r message=FALSE}
+# Find unique (url, title) pairs and identify titles used more than once
+titles_with_multiple_urls <- df %>%
+  group_by(title, url) %>%
+  summarise(count = n()) %>%
+  group_by(title) %>%
+  summarise(unique_url_count = n_distinct(url)) %>%
+  filter(unique_url_count > 1)
+
+print(titles_with_multiple_urls)
+
+df %>% filter(title=='Accurate') %>% summarise(count = n())
+
+# Filter rows with title 'Accurate', group by 'url', and count the number of comments for each URL
+comments_count_per_url <- df %>%
+  filter(title == "Accurate") %>%
+  group_by(url) %>%
+  summarise(count = n())
+
+print(comments_count_per_url)
+
+```
+
+## Convert chr dates to timestamps
+
+```{r}
+# Read the cleaned data(before tokenized)
+df_clean <- read.csv('pre-processed_data.csv', header = TRUE)
+df_clean$date_utc <- ymd(df_clean$date_utc) # covert chr to timestamp
+head(df_clean)
+
+```
+
+## Perform topic modeling, label each row of the original data (df_clean) with the assigned topics.
+
+```{r}
+
+# Combine titles and title_text
+unique_titles <- df_clean %>%
+  mutate(document_id = row_number(),
+         title_text = ifelse(trimws(title_text) == "", "no_title_text", title_text)) %>%  
+  select(document_id, title, title_text, date_utc, comment)
+
+text_data <- unique_titles %>%
+  mutate(combined_text = paste(title, title_text, sep = " ")) %>%
+  select(document_id, combined_text)
+
+# Tokenize the combined text data
+tokens <- text_data %>%
+  unnest_tokens(word, combined_text) %>%
+  filter(word != "x200b") # Remove "x200b" from tokens
+
+# Remove stopwords
+tokens_no_stopwords <- tokens %>%
+  anti_join(stop_words)
+
+# Lemmatize the words
+data_clean <- tokens_no_stopwords %>%
+  mutate(word = lemmatize_strings(word))
+
+# Create a document-term matrix
+dtm <- data_clean %>%
+  count(document_id, word) %>%
+  cast_dtm(document_id, word, n)
+
+# Find topics
+assign_topics <- function(dtm, unique_titles, num_topics) {
+  # Fit the LDA model
+  lda_model <- LDA(dtm, k = num_topics)
+
+  # Extract the document-topic matrix (gamma matrix)
+  document_topics <- tidy(lda_model, matrix = "gamma")
+
+  # Convert the 'document_id' column to integer in document_topics
+  document_topics$document_id <- as.integer(document_topics$document)
+
+  # Assign the topic with the highest probability to each title
+  assigned_topics <- document_topics %>%
+    group_by(document_id) %>%
+    top_n(1, gamma) %>%
+    select(document_id, topic)
+
+  # Add the assigned topics to the unique_titles data frame
+  unique_titles_with_assigned_topics <- unique_titles %>%
+    left_join(assigned_topics, by = "document_id")
+  
+  return(unique_titles_with_assigned_topics)
+}
+
+
+num_topics <- 8
+unique_titles_with_assigned_topics <- assign_topics(dtm, unique_titles, num_topics)
+head(unique_titles_with_assigned_topics)
+```
+
+```{r}
+# write.csv(unique_titles_with_assigned_topics, "titles_with_topics.csv", row.names = FALSE) # save the output from above as it takes a long time to run the code
+
+topic_df <- read.csv('titles_with_topics.csv', header = TRUE)
+glimpse(topic_df)
+
+```
+
+## Extract 15 top words from each topic
+
+```{r}
+# Function to get top words for each topic
+get_top_words <- function(lda_model, num_top_words = 10) {
+  topic_terms <- tidy(lda_model, matrix = "beta")
+  
+  top_words <- topic_terms %>%
+    group_by(topic) %>%
+    top_n(num_top_words, beta) %>%
+    ungroup() %>%
+    arrange(topic, -beta)
+  
+  return(top_words)
+}
+
+# Extract top words for each topic
+lda_model <- LDA(dtm, k = 8)
+num_top_words <- 15
+top_words <- get_top_words(lda_model, num_top_words)
+
+# Print top words for each topic
+top_words
+
+```
+
+## Plot the top 15 words for each topic
+
+```{r}
+library(ggplot2)
+
+# Create a plotting data frame
+plot_data <- top_words %>%
+  ungroup() %>%
+  mutate(topic = as.factor(topic),
+         term = as.factor(term))
+
+head(plot_data)
+
+
+# Split plot_data into separate data frames for each topic
+topics_list <- split(plot_data, plot_data$topic)
+
+# Create separate plots for each topic
+for (i in 1:length(topics_list)) {
+  topic_plot <- ggplot(topics_list[[i]], aes(x = reorder(term, -beta), y = beta, fill = topic)) +
+    geom_col(show.legend = FALSE) +
+    coord_flip() +
+    labs(x = "Words", y = "Beta", title = paste("Top 15 Words for Topic", i)) +
+    theme_minimal() +
+    theme(panel.grid.major = element_blank(),
+          panel.grid.minor = element_blank(),
+          strip.background = element_rect(fill = "white", color = "white"),
+          axis.text.y = element_text(size = 8),
+      plot.title = element_text(hjust = 0.5, size = rel(2)) # Center and increase the title size
+    
+    )
+  
+  
+  
+  print(topic_plot)
+  # Save the plot to a file
+  file_name <- paste("topic_plot_", i, ".png", sep = "")
+  ggsave(filename = file_name, plot = topic_plot, width = 10, height = 6)
+}
+
+
+```
+
+## Topic comment counts
+
+```{r setup, include=TRUE}
+knitr::opts_chunk$set(
+	echo = TRUE,
+	message = FALSE,
+	out.width = "100%"
+)
+comments_in_title_count <- topic_df %>% 
+  group_by(title,title_text,topic) %>%
+  summarize(count = n()) %>%
+ arrange(desc(count)) %>% select(topic,count,title,title_text)
+
+head(comments_in_title_count, 20)
+
+#comments_in_title_count
+```
+
+## Topic comment counts in each month
+
+```{r}
+
+# Define a function to filter data by month
+filter_data_by_month <- function(data, month_num) {
+  data %>%
+    filter(month(date_utc) == month_num) %>% select(-document_id)
+}
+
+# Filter data for months 12, 1, 2, 3, and 4
+month_12_comments <- filter_data_by_month(topic_df, 12)
+month_1_comments <- filter_data_by_month(topic_df, 1)
+month_2_comments <- filter_data_by_month(topic_df, 2)
+month_3_comments <- filter_data_by_month(topic_df, 3)
+month_4_comments <- filter_data_by_month(topic_df, 4)
+# Print the first few rows of each data frame
+# head(month_12_comments)
+# # head(month_1_comments)
+# # head(month_2_comments)
+# # head(month_3_comments)
+
+# Function to filter data by month and get the top 10 titles with other info
+top_titles_by_month <- function(data) {
+  data %>%
+    group_by(title,topic) %>%
+    summarize(count = n()) %>%
+    arrange(desc(count)) %>%
+    head(10)
+}
+top_titles_by_month(month_12_comments)
+top_titles_by_month(month_1_comments)
+top_titles_by_month(month_2_comments)
+top_titles_by_month(month_3_comments)
+top_titles_by_month(month_4_comments)
+
+```
+
+```{r}
+
+# Define a function to filter data by month
+filter_data_by_month <- function(data, month_num) {
+  data %>%
+    filter(month(date_utc) == month_num) %>% select(-document_id)
+}
+
+# Filter data for months 12, 1, 2, and 3
+month_12_comments <- filter_data_by_month(topic_df, 12)
+month_1_comments <- filter_data_by_month(topic_df, 1)
+month_2_comments <- filter_data_by_month(topic_df, 2)
+month_3_comments <- filter_data_by_month(topic_df, 3)
+month_4_comments <- filter_data_by_month(topic_df, 4)
+# Print the first few rows of each data frame
+# head(month_12_comments)
+# # head(month_1_comments)
+# # head(month_2_comments)
+# # head(month_3_comments)
+
+# Function to filter data by month and get the top 10 titles with other info
+top_titles_by_month <- function(data) {
+  data %>%
+    group_by(title,topic) %>%
+    summarize(count = n()) %>%
+    arrange(desc(count)) %>%
+    head(10)
+}
+top_titles_by_month(month_12_comments)
+top_titles_by_month(month_1_comments)
+top_titles_by_month(month_2_comments)
+top_titles_by_month(month_3_comments)
+top_titles_by_month(month_4_comments)
+
+```
+
+```{r}
+# Save files in case for further analysis 
+# write_csv(month_12_comments,'dec_comments.csv')
+# write_csv(month_1_comments,'jan_comments.csv')
+# write_csv(month_2_comments,'feb_comments.csv')
+# write_csv(month_3_comments,'mar_comments.csv')
+# write_csv(month_4_comments,'apr_comments.csv')
+```
+
+```{r}
+dec_df <- read.csv('dec_comments.csv')
+jan_df <- read.csv('jan_comments.csv')
+feb_df <- read.csv('feb_comments.csv')
+mar_df <- read.csv('mar_comments.csv')
+apr_df <- read.csv('apr_comments.csv')
+str(dec_df)
+```
+
+
+# Plot the trending topics of the all the months and every month
+```{r}
+create_topic_histogram <- function(df, dataset_name) {
+  title_text <- paste("Topics of", dataset_name)
+  topic_histogram <- ggplot(df, aes(x = factor(topic))) +
+    geom_histogram(stat = "count", fill = "steelblue", color = "black") +
+    labs(x = "Topic", y = "Count", title = title_text) +
+    theme_bw() + # Change the background color to white
+    theme(
+      plot.title = element_text(hjust = 0.5, size = rel(2)), # Center and increase the title size
+      axis.text = element_text(size = rel(2)), # Increase axis tick labels size
+      axis.title = element_text(size = rel(2)) # Increase axis labels size
+    )
+
+  # Save the plot to a file
+  file_name <- paste("topic_histogram_", dataset_name, ".png", sep = "")
+  ggsave(filename = file_name, plot = topic_histogram, width = 10, height = 6)
+
+  return(topic_histogram)
+}
+
+
+
+# List of data frames and their names
+data_frames <- list(dec_df, jan_df, feb_df, mar_df,apr_df)
+data_frame_names <- c("DEC", "JAN", "FEB", "MAR","Apr")
+
+# Loop through the data frames and their names
+for (i in 1:length(data_frames)) {
+  df <- data_frames[[i]]
+  df_name <- data_frame_names[i]
+
+  # Create and save the histogram for the current data frame
+  topic_histogram <- create_topic_histogram(df, df_name)
+  print(topic_histogram)
+}
+
+```
+
+```{r}
+
+create_topic_histogram(topic_df,'all Months')
+```
+
+```{r}
+topic_df %>%
+  filter(topic == 8) %>%
+  distinct(title) %>%
+  arrange(title)
+```
+
+```{r}
+ # Save the unique titles & title texts of each topic  as a CSV file in case of further need
+# for (topic_number in 1:8) {
+#   # Filter rows with the current topic, select unique titles, and arrange them
+#   unique_titles_current_topic <- topic_df %>%
+#     filter(topic == topic_number) %>%
+#     distinct(title,title_text) %>%
+#     arrange(title)
+# 
+#   file_name <- paste("unique_titles_topic_", topic_number, ".csv", sep = "")
+#   write.csv(unique_titles_current_topic, file_name, row.names = FALSE)
+# }
+```
+
+------------------------------------------------------------------------
+
+# Part Four: Sentiment Analysis 
+
+```{r}
+# This part uses the file produced in the last section
+df_dec <- read.csv('dec_comments.csv', header = TRUE)
+df_dec$date_utc <- as.Date(df_dec$date_utc)
+glimpse(df_dec)
+```
+
+```{r}
+df_dec_tokens <- df_dec %>%
+  unnest_tokens(word, comment) %>%
+  anti_join(stop_words) %>%
+  mutate(word = lemmatize_strings(word))
+```
+
+```{r}
+dec_afinn <- df_dec_tokens %>%
+  inner_join(get_sentiments("afinn"),by='word') %>% 
+  count(topic,value) %>% 
+  group_by(topic) %>% 
+  summarise(total_positive = sum(value[value > 0] * n[value > 0]),
+            total_negative = sum(value[value < 0] * n[value < 0]),
+            sentiment = total_positive + total_negative,
+            average = (total_positive - total_negative)/ sum(n))
+```
+
+```{r}
+ggplot(dec_afinn,aes(topic, sentiment)) + geom_bar(stat="identity")+
+  geom_smooth()+scale_x_continuous(breaks = seq(1, max(dec_afinn$topic), by = 2))+
+  labs(title = "Topic Sentiment Change of ChatGPT")+
+  theme(plot.title = element_text(hjust = 0.5,size=11))
+```
+
+## Initially, we aimed to identify topics with strong emotions by analyzing the average emotion score of words within each topic. Unfortunately, as evident from the graph, the scores for each group are virtually identical. 
+
+```{r}
+ggplot(dec_afinn,aes(topic, average)) + geom_bar(stat="identity")+
+  labs(title = "Absolute Sentiment Value per Word for the topics")+
+  theme(plot.title = element_text(hjust = 0.5,size=11))
+```
+
+```{r}
+dec_afinn_date <- df_dec_tokens %>%
+  inner_join(get_sentiments("bing"),by='word') %>% 
+  count(date_utc,sentiment) %>% 
+  pivot_wider(names_from = "sentiment", values_from = "n") %>% 
+  mutate(sentiment = positive - negative) 
+```
+
+```{r}
+ggplot(dec_afinn_date,aes(date_utc, sentiment)) + geom_bar(stat="identity")+
+  geom_smooth()+scale_x_date(date_labels = "%m/%d/%Y", date_breaks = "5 day")+
+  labs(title = "Sentiment Change of chatGPT over time by bing - Dec")+
+  theme(plot.title = element_text(hjust = 0.5,size=11))
+```
+
+```{r}
+df_total <- read.csv('titles_with_topics.csv', header = TRUE)
+df_total$date_utc <- as.Date(df_total$date_utc)
+glimpse(df_dec)
+```
+
+```{r}
+df_total_tokens <- df_total %>%
+  unnest_tokens(word, comment) %>%
+  anti_join(stop_words) %>%
+  mutate(word = lemmatize_strings(word))
+```
+
+## Bing Sentiment over Time
+
+```{r}
+total_bing_date <- df_total_tokens %>%
+  inner_join(get_sentiments("bing"),by='word') %>% 
+  count(date_utc,sentiment) %>% 
+  pivot_wider(names_from = "sentiment", values_from = "n") %>% 
+  mutate(sentiment = positive - negative) 
+```
+
+```{r}
+ggplot(total_bing_date,aes(date_utc, sentiment)) + geom_bar(stat="identity")+
+  geom_smooth()+scale_x_date(date_labels = "%m/%d/%Y", date_breaks = "20 day")+
+  labs(title = "Sentiment Change of chatGPT over time by bing")+
+  theme(plot.title = element_text(hjust = 0.5,size=11))
+```
+
+## Afinn Sentiment over Time
+
+```{r}
+total_afinn_date <- df_total_tokens %>%
+  inner_join(get_sentiments("afinn"),by='word') %>% 
+  count(date_utc,value) %>% 
+  group_by(date_utc) %>% 
+  summarise(total_positive = sum(value[value > 0] * n[value > 0]),
+            total_negative = sum(value[value < 0] * n[value < 0])) %>% 
+  mutate(sentiment = total_positive +total_negative)
+```
+
+```{r}
+ggplot(total_afinn_date,aes(date_utc, sentiment)) + geom_bar(stat="identity")+
+  geom_smooth()+scale_x_date(date_labels = "%m/%d/%Y", date_breaks = "20 day")+
+  labs(title = "Sentiment Change of chatGPT over time by afinn")+
+  theme(plot.title = element_text(hjust = 0.5,size=11))
+```
+
+```{r}
+library(sentimentr)
+```
+
+## Sentiment Analysis by Sentimentr
+
+```{r}
+sentence_score = sentiment(get_sentences(df_total$comment))
+```
+
+```{r}
+comment_score = sentence_score %>% 
+  group_by(element_id) %>%
+  summarize(sum_value = sum(sentiment))
+```
+
+```{r}
+df_total_score <- cbind(df_total, comment_score)
+```
+
+```{r}
+total_score_date <- df_total_score %>%
+  count(date_utc,sum_value) %>% 
+  group_by(date_utc) %>% 
+  summarise(total_positive = sum(sum_value[sum_value > 0] * n[sum_value > 0]),
+            total_negative = sum(sum_value[sum_value < 0] * n[sum_value < 0])) %>% 
+  mutate(total_score = total_positive +total_negative)
+```
+
+```{r}
+ggplot(total_score_date,aes(date_utc, total_score)) + geom_bar(stat="identity")+
+  geom_smooth()+scale_x_date(date_labels = "%m/%d/%Y", date_breaks = "20 day")+
+  labs(title = "Sentiment Change of chatGPT over time by sentimentr")+
+  theme(plot.title = element_text(hjust = 0.5,size=11))
+```
+
+## Sentiment Analysis by NRC
+
+```{r}
+basic_emotions <- c("anger", "fear", "anticipation", "trust", "surprise", "sadness", "joy", "disgust")
+
+nrc_topic <- df_total_tokens %>%
+  inner_join(get_sentiments("nrc")) %>%
+  filter(sentiment %in% basic_emotions) %>%
+  count(topic, sentiment) %>%
+  spread(sentiment, n, fill = 0)
+
+totals <- nrc_topic %>%
+  summarise(across(2:9, \(x) sum(x, na.rm = TRUE))) 
+
+nrc_topic_total <- bind_rows(nrc_topic, totals)
+
+nrc_topic_total
+```
+
+
+```{r}
+df_total_tokens$month <- floor_date(df_total_tokens$date_utc, "month")
+```
+
+```{r}
+nrc_month <- df_total_tokens %>%
+  inner_join(get_sentiments("nrc")) %>%
+  filter(sentiment %in% basic_emotions) %>%
+  count(month, sentiment) %>%
+  spread(sentiment, n, fill = 0)
+
+totals_month <- nrc_month %>%
+  summarise(across(2:9, \(x) sum(x, na.rm = TRUE)))
+
+nrc_month_total <- bind_rows(nrc_month, totals_month)
+
+nrc_month_total
+```
+```{r}
+nrc_month_total_2 <- nrc_month_total %>%
+  mutate(month = c('December', 'January', 'February', 'March', 'April', 'Total'))
+
+nrc_month_total_2
+nrc_month_total
+```
+
+```{r}
+nrc_month_total_long <- nrc_month_total %>%
+  gather(sentiment, count, -month)
+
+# Create a line chart of emotion counts by month
+ggplot(nrc_month_total_long, aes(x = month, y = count, color = sentiment)) +
+  geom_line() +
+  geom_point() +
+  labs(title = "Emotion Counts by Month", x = "Month", y = "Count") +
+  theme_minimal()
+```
+
+
